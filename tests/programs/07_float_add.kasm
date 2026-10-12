@@ -1,0 +1,8 @@
+.function "main" arity=0 regs=4
+.const_int 0
+.const_str "3.14"
+LOADI r1, 10
+LOADI r2, 5
+FADD r0, r1, r2
+RETURN r0
+.end

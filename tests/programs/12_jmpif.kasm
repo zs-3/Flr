@@ -1,0 +1,9 @@
+.function "main" arity=0 regs=4
+LOADI r1, 1
+JMPIF r1, @true_branch
+LOADI r0, 0
+RETURN r0
+@true_branch:
+LOADI r0, 100
+RETURN r0
+.end

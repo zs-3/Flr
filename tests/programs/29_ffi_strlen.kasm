@@ -1,0 +1,8 @@
+.ffi_sig "strlen" "i64(ptr)"
+.function "main" arity=0 regs=4
+.const_str "test_string"
+LOADK r1, 0
+FFICALL r0, r1, 0
+DROP r1
+RETURN r0
+.end

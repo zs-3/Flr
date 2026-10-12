@@ -1,0 +1,8 @@
+.function "main" arity=0 regs=4
+JMP @target
+LOADI r0, 999
+RETURN r0
+@target:
+LOADI r0, 100
+RETURN r0
+.end

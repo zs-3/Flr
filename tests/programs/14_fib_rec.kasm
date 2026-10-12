@@ -1,0 +1,23 @@
+.function "main" arity=0 regs=4
+LOADI r1, 10
+LOADI r2, 1
+CALL r0, r2, 1
+RETURN r0
+.end
+
+.function "fib" arity=1 regs=4
+LOADI r1, 1
+JLE r0, r1, @base
+LOADI r1, 1
+ISUB r2, r0, r1
+LOADI r1, 1
+CALL r3, r1, 1
+LOADI r1, 2
+ISUB r2, r0, r1
+LOADI r1, 1
+CALL r1, r1, 1
+IADD r0, r3, r1
+RETURN r0
+@base:
+RETURN r0
+.end

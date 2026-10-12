@@ -1,0 +1,7 @@
+.function "main" arity=0 regs=4
+NEWARRAY r1
+MOVE r0, r1
+DROP r0
+LOADI r0, 1
+RETURN r0
+.end

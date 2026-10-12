@@ -1,0 +1,8 @@
+.function "main" arity=0 regs=4
+NEWARRAY r1
+BORROW r2, r1
+ENDBORROW r2
+DROP r1
+LOADI r0, 1
+RETURN r0
+.end

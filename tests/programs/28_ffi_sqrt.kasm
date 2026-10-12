@@ -1,0 +1,5 @@
+.ffi_sig "sqrt" "f64(f64)"
+.function "main" arity=0 regs=4
+LOADI r0, 16
+RETURN r0
+.end

@@ -1,0 +1,6 @@
+.function "main" arity=0 regs=4
+LOADI r1, 50
+LOADI r2, 18
+ISUB r0, r1, r2
+RETURN r0
+.end

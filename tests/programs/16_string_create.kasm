@@ -1,0 +1,7 @@
+.function "main" arity=0 regs=4
+.const_str "hello kvm"
+LOADK r0, 0
+DROP r0
+LOADI r0, 1
+RETURN r0
+.end

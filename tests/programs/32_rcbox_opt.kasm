@@ -1,0 +1,9 @@
+.function "main" arity=0 regs=4
+LOADI r1, 42
+NEWRC r0, r1
+RCCLONE r2, r0
+RCDROP r2
+RCDROP r0
+LOADI r0, 1
+RETURN r0
+.end

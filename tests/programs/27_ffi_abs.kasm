@@ -1,0 +1,6 @@
+.ffi_sig "abs" "i64(i64)"
+.function "main" arity=0 regs=4
+LOADI r1, -42
+FFICALL r0, r1, 0
+RETURN r0
+.end

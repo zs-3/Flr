@@ -1,0 +1,13 @@
+.function "main" arity=0 regs=4
+LOADI r0, 0
+LOADI r1, 0
+LOADI r2, 100
+LOADI r3, 1
+@loop:
+JLT r1, r2, @body
+RETURN r0
+@body:
+IADD r0, r0, r1
+IADD r1, r1, r3
+JMP @loop
+.end
