@@ -101,6 +101,10 @@ typedef enum {
 #define KVM_IMM16(inst)     ((uint16_t)(((inst) >> 16) & 0xFFFFU))
 #define KVM_SIMM16(inst)    ((int16_t)((int16_t)(((inst) >> 16) & 0xFFFFU)))
 
+#define KVM_CMP_REG_A(inst)  ((uint8_t)(((inst) >> 8) & 0xFU))
+#define KVM_CMP_REG_B(inst)  ((uint8_t)(((inst) >> 12) & 0xFU))
+#define KVM_CMP_SIMM16(inst) ((int16_t)((int16_t)(((inst) >> 16) & 0xFFFFU)))
+
 #define KVM_ENCODE_ABC(op, a, b, c) \
     ((KvmInstruction)(((uint32_t)(op) & 0xFFU) | \
                      (((uint32_t)(a) & 0xFFU) << 8) | \
@@ -114,6 +118,12 @@ typedef enum {
 
 #define KVM_ENCODE_ABSI(op, a, simm) \
     KVM_ENCODE_ABI(op, a, (uint16_t)(simm))
+
+#define KVM_ENCODE_ABSI_CMP(op, a, b, simm) \
+    ((KvmInstruction)(((uint32_t)(op) & 0xFFU) | \
+                     (((uint32_t)(a) & 0xFU) << 8) | \
+                     (((uint32_t)(b) & 0xFU) << 12) | \
+                     (((uint32_t)(simm) & 0xFFFFU) << 16)))
 
 typedef struct KvmFfiSig {
     char *symbol_name;

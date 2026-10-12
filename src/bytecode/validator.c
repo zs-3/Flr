@@ -118,10 +118,16 @@ KvmStatus kvm_bytecode_validate(const KvmBytecode *bc, char *err_msg, size_t err
             }
 
             /* Jump target bounds check */
-            if (op == OP_JMP || op == OP_JMPIF || op == OP_JMPIFNOT ||
-                op == OP_JLT || op == OP_JLE || op == OP_JEQ ||
-                op == OP_JNLT || op == OP_JNLE || op == OP_JNEQ) {
+            if (op == OP_JMP || op == OP_JMPIF || op == OP_JMPIFNOT) {
                 int16_t offset = KVM_SIMM16(inst);
+                int target = (int)pc + 1 + offset;
+                if (target < 0 || target >= (int)fn->code_count) {
+                    report_error(err_msg, err_msg_cap, fn->name, pc, "Jump target out of range");
+                    return KVM_ERR_VERIFIER_FAILURE;
+                }
+            } else if (op == OP_JLT || op == OP_JLE || op == OP_JEQ ||
+                       op == OP_JNLT || op == OP_JNLE || op == OP_JNEQ) {
+                int8_t offset = (int8_t)rc;
                 int target = (int)pc + 1 + offset;
                 if (target < 0 || target >= (int)fn->code_count) {
                     report_error(err_msg, err_msg_cap, fn->name, pc, "Jump target out of range");

@@ -54,6 +54,17 @@ static bool parse_reg(const char **pp, uint8_t *reg, int *col) {
     return true;
 }
 
+static bool parse_double(const char **pp, double *val, int *col) {
+    const char *p = *pp;
+    char *endp = NULL;
+    double d = strtod(p, &endp);
+    if (endp == p) return false;
+    *col += (int)(endp - p);
+    *val = d;
+    *pp = endp;
+    return true;
+}
+
 static bool parse_int(const char **pp, int *val, int *col) {
     const char *p = *pp;
     int sign = 1;
@@ -200,6 +211,14 @@ KvmStatus kvm_bytecode_assemble(const char *source, KvmBytecode **out_bc, char *
                 cur_fn->const_count++;
                 cur_fn->const_pool = (Value *)realloc(cur_fn->const_pool, sizeof(Value) * cur_fn->const_count);
                 cur_fn->const_pool[cur_fn->const_count - 1] = kvm_val_int48(num);
+            } else if (strcmp(dir, ".const_double") == 0) {
+                if (!cur_fn) { report_asm_err(err_msg, err_cap, line, col, ".const_double outside function"); kvm_bytecode_destroy(NULL, bc); return KVM_ERR_CORRUPT_BYTECODE; }
+                p = skip_space_and_comments(p, &line, &col);
+                double dnum = 0.0;
+                parse_double(&p, &dnum, &col);
+                cur_fn->const_count++;
+                cur_fn->const_pool = (Value *)realloc(cur_fn->const_pool, sizeof(Value) * cur_fn->const_count);
+                cur_fn->const_pool[cur_fn->const_count - 1] = kvm_val_double(dnum);
             } else if (strcmp(dir, ".const_str") == 0) {
                 if (!cur_fn) { report_asm_err(err_msg, err_cap, line, col, ".const_str outside function"); kvm_bytecode_destroy(NULL, bc); return KVM_ERR_CORRUPT_BYTECODE; }
                 p = skip_space_and_comments(p, &line, &col);
@@ -228,10 +247,14 @@ KvmStatus kvm_bytecode_assemble(const char *source, KvmBytecode **out_bc, char *
                         int offset = target_pc - (inst_idx + 1);
                         KvmInstruction old_inst = cur_fn->code[inst_idx];
                         uint8_t op = KVM_OPCODE(old_inst);
-                        uint8_t ra = KVM_REG_A(old_inst);
-                        uint8_t rb = KVM_REG_B(old_inst);
-                        cur_fn->code[inst_idx] = (op == OP_JMP || op == OP_JMPIF || op == OP_JMPIFNOT) ?
-                            KVM_ENCODE_ABSI(op, ra, offset) : KVM_ENCODE_ABC(op, ra, rb, (uint8_t)offset);
+                        if (op == OP_JMP || op == OP_JMPIF || op == OP_JMPIFNOT) {
+                            uint8_t ra = KVM_REG_A(old_inst);
+                            cur_fn->code[inst_idx] = KVM_ENCODE_ABSI(op, ra, offset);
+                        } else {
+                            uint8_t ra = KVM_CMP_REG_A(old_inst);
+                            uint8_t rb = KVM_CMP_REG_B(old_inst);
+                            cur_fn->code[inst_idx] = KVM_ENCODE_ABSI_CMP(op, ra, rb, offset);
+                        }
                     }
                     cur_fn = NULL;
                 }
@@ -385,7 +408,15 @@ KvmStatus kvm_bytecode_assemble(const char *source, KvmBytecode **out_bc, char *
             label_refs[num_refs].col = col;
             strcpy(label_refs[num_refs].name, ref_label_name);
             num_refs++;
-            inst = KVM_ENCODE_ABSI(opcode, ra, 0);
+            if (opcode == OP_JLT || opcode == OP_JLE || opcode == OP_JEQ ||
+                opcode == OP_JNLT || opcode == OP_JNLE || opcode == OP_JNEQ) {
+                inst = KVM_ENCODE_ABSI_CMP(opcode, ra, rb, 0);
+            } else {
+                inst = KVM_ENCODE_ABSI(opcode, ra, 0);
+            }
+        } else if (opcode == OP_JLT || opcode == OP_JLE || opcode == OP_JEQ ||
+                   opcode == OP_JNLT || opcode == OP_JNLE || opcode == OP_JNEQ) {
+            inst = KVM_ENCODE_ABSI_CMP(opcode, ra, rb, imm);
         } else if (opcode == OP_LOADI || opcode == OP_LOADK || opcode == OP_JMP || opcode == OP_JMPIF || opcode == OP_JMPIFNOT) {
             inst = KVM_ENCODE_ABSI(opcode, ra, imm);
         } else {

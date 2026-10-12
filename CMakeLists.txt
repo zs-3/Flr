@@ -31,7 +31,7 @@ set(MIR_SOURCES
 )
 
 add_library(mir_lib STATIC ${MIR_SOURCES})
-target_compile_options(mir_lib PRIVATE "SHELL:-include stdarg.h" "SHELL:-include stddef.h" "SHELL:-include stdint.h" -w)
+target_compile_options(mir_lib PRIVATE "SHELL:-include stdarg.h" "SHELL:-include stddef.h" "SHELL:-include stdint.h" -w -fno-sanitize=undefined)
 
 # KVM library sources
 file(GLOB_RECURSE KVM_CORE_SOURCES src/core/*.c)
@@ -77,7 +77,13 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/fuzz_validator.c")
 endif()
 
 # Benchmark suite
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/benchmarks.c")
-    add_executable(kvm_benchmarks tests/benchmarks.c)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/benchmarks.c")
+    add_executable(kvm_benchmarks benchmarks/benchmarks.c)
     target_link_libraries(kvm_benchmarks PRIVATE vm)
+endif()
+
+# Embedding C API example target
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/embed.c")
+    add_executable(kvm_embed_example examples/embed.c)
+    target_link_libraries(kvm_embed_example PRIVATE vm)
 endif()

@@ -28,6 +28,69 @@ static Value jit_helper_add(KvmVM *vm, Value v1, Value v2) {
     return NIL_VAL;
 }
 
+static Value jit_helper_sub(KvmVM *vm, Value v1, Value v2) {
+    (void)vm;
+    if (IS_INT48(v1) && IS_INT48(v2)) {
+        return INT48_VAL(VALUE_TO_INT48(v1) - VALUE_TO_INT48(v2));
+    }
+    if (IS_DOUBLE(v1) && IS_DOUBLE(v2)) {
+        return DOUBLE_VAL(VALUE_TO_DOUBLE(v1) - VALUE_TO_DOUBLE(v2));
+    }
+    return NIL_VAL;
+}
+
+static Value jit_helper_mul(KvmVM *vm, Value v1, Value v2) {
+    (void)vm;
+    if (IS_INT48(v1) && IS_INT48(v2)) {
+        return INT48_VAL(VALUE_TO_INT48(v1) * VALUE_TO_INT48(v2));
+    }
+    if (IS_DOUBLE(v1) && IS_DOUBLE(v2)) {
+        return DOUBLE_VAL(VALUE_TO_DOUBLE(v1) * VALUE_TO_DOUBLE(v2));
+    }
+    return NIL_VAL;
+}
+
+static Value jit_helper_div(KvmVM *vm, Value v1, Value v2) {
+    if (IS_INT48(v1) && IS_INT48(v2)) {
+        int64_t d = VALUE_TO_INT48(v2);
+        if (d == 0) {
+            kvm_vm_set_error(vm, "Division by zero");
+            return NIL_VAL;
+        }
+        return INT48_VAL(VALUE_TO_INT48(v1) / d);
+    }
+    if (IS_DOUBLE(v1) && IS_DOUBLE(v2)) {
+        return DOUBLE_VAL(VALUE_TO_DOUBLE(v1) / VALUE_TO_DOUBLE(v2));
+    }
+    return NIL_VAL;
+}
+
+static Value jit_helper_mod(KvmVM *vm, Value v1, Value v2) {
+    if (IS_INT48(v1) && IS_INT48(v2)) {
+        int64_t d = VALUE_TO_INT48(v2);
+        if (d == 0) {
+            kvm_vm_set_error(vm, "Modulo by zero");
+            return NIL_VAL;
+        }
+        return INT48_VAL(VALUE_TO_INT48(v1) % d);
+    }
+    return NIL_VAL;
+}
+
+static Value jit_helper_call(KvmVM *vm, Value func_val, Value *arg_regs, int arg_count) {
+    if (IS_INT48(func_val)) {
+        uint32_t fidx = (uint32_t)VALUE_TO_INT48(func_val);
+        KvmBytecode *bc = kvm_vm_get_bytecode(vm);
+        if (bc && fidx < bc->func_count) {
+            KvmFunction *callee = bc->functions[fidx];
+            Value res = NIL_VAL;
+            kvm_vm_run_function(vm, callee, arg_regs, (uint16_t)arg_count, &res);
+            return res;
+        }
+    }
+    return NIL_VAL;
+}
+
 static Value jit_helper_drop(KvmVM *vm, Value val) {
     if (IS_POINTER(val)) {
         kvm_ownership_drop(kvm_vm_get_allocator(vm), VALUE_TO_HEAP_OBJ(val));
@@ -40,6 +103,11 @@ static Value jit_helper_move(KvmVM *vm, Value *src_ptr) {
     Value v = *src_ptr;
     *src_ptr = NIL_VAL;
     return v;
+}
+
+static Value jit_helper_trap(KvmVM *vm, int64_t pc) {
+    kvm_vm_set_error(vm, "Runtime trap at pc=%ld", (long)pc);
+    return NIL_VAL;
 }
 
 KvmJitContext *kvm_jit_init(KvmVM *vm) {
@@ -76,25 +144,38 @@ bool kvm_jit_compile_function(KvmJitContext *jctx, KvmFunction *fn) {
 
     char func_sym[256];
     snprintf(func_sym, sizeof(func_sym), "jit_func_%s_%p", fn->name, (void*)fn);
-    MIR_item_t mir_func_item = MIR_new_func(ctx, func_sym, 1, &res_type, 2, MIR_T_P, "vm", MIR_T_P, "regs");
+    MIR_item_t mir_func_item = MIR_new_func(ctx, func_sym, 1, &res_type, 2, MIR_T_I64, "vm", MIR_T_I64, "regs");
     MIR_func_t mir_func = MIR_get_item_func(ctx, mir_func_item);
 
     MIR_reg_t vm_reg = MIR_reg(ctx, "vm", mir_func);
     MIR_reg_t regs_reg = MIR_reg(ctx, "regs", mir_func);
 
-    MIR_item_t proto_helper2 = MIR_new_proto(ctx, "proto_h2", 1, &res_type, 3, MIR_T_P, MIR_T_I64, MIR_T_I64);
-    MIR_item_t proto_helper1 = MIR_new_proto(ctx, "proto_h1", 1, &res_type, 2, MIR_T_P, MIR_T_I64);
+    MIR_item_t proto_helper2 = MIR_new_proto(ctx, "proto_h2", 1, &res_type, 3, MIR_T_I64, "p1", MIR_T_I64, "v1", MIR_T_I64, "v2");
+    MIR_item_t proto_helper1 = MIR_new_proto(ctx, "proto_h1", 1, &res_type, 2, MIR_T_I64, "p1", MIR_T_I64, "v1");
+    MIR_item_t proto_call    = MIR_new_proto(ctx, "proto_call", 1, &res_type, 4, MIR_T_I64, "p1", MIR_T_I64, "v1", MIR_T_I64, "v2", MIR_T_I64, "v3");
 
-    MIR_item_t import_add = MIR_new_import(ctx, "jit_helper_add");
+    MIR_item_t import_add  = MIR_new_import(ctx, "jit_helper_add");
+    MIR_item_t import_sub  = MIR_new_import(ctx, "jit_helper_sub");
+    MIR_item_t import_mul  = MIR_new_import(ctx, "jit_helper_mul");
+    MIR_item_t import_div  = MIR_new_import(ctx, "jit_helper_div");
+    MIR_item_t import_mod  = MIR_new_import(ctx, "jit_helper_mod");
+    MIR_item_t import_call = MIR_new_import(ctx, "jit_helper_call");
     MIR_item_t import_drop = MIR_new_import(ctx, "jit_helper_drop");
     MIR_item_t import_move = MIR_new_import(ctx, "jit_helper_move");
+    MIR_item_t import_trap = MIR_new_import(ctx, "jit_helper_trap");
 
-    MIR_load_external(ctx, "jit_helper_add", (void*)(uintptr_t)jit_helper_add);
+    MIR_load_external(ctx, "jit_helper_add",  (void*)(uintptr_t)jit_helper_add);
+    MIR_load_external(ctx, "jit_helper_sub",  (void*)(uintptr_t)jit_helper_sub);
+    MIR_load_external(ctx, "jit_helper_mul",  (void*)(uintptr_t)jit_helper_mul);
+    MIR_load_external(ctx, "jit_helper_div",  (void*)(uintptr_t)jit_helper_div);
+    MIR_load_external(ctx, "jit_helper_mod",  (void*)(uintptr_t)jit_helper_mod);
+    MIR_load_external(ctx, "jit_helper_call", (void*)(uintptr_t)jit_helper_call);
     MIR_load_external(ctx, "jit_helper_drop", (void*)(uintptr_t)jit_helper_drop);
     MIR_load_external(ctx, "jit_helper_move", (void*)(uintptr_t)jit_helper_move);
+    MIR_load_external(ctx, "jit_helper_trap", (void*)(uintptr_t)jit_helper_trap);
 
-    MIR_reg_t saved_vm_reg = MIR_new_func_reg(ctx, mir_func, MIR_T_P, "saved_vm");
-    MIR_reg_t saved_regs_reg = MIR_new_func_reg(ctx, mir_func, MIR_T_P, "saved_regs");
+    MIR_reg_t saved_vm_reg = MIR_new_func_reg(ctx, mir_func, MIR_T_I64, "saved_vm");
+    MIR_reg_t saved_regs_reg = MIR_new_func_reg(ctx, mir_func, MIR_T_I64, "saved_regs");
     MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, saved_vm_reg), MIR_new_reg_op(ctx, vm_reg)));
     MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, saved_regs_reg), MIR_new_reg_op(ctx, regs_reg)));
 
@@ -142,7 +223,7 @@ bool kvm_jit_compile_function(KvmJitContext *jctx, KvmFunction *fn) {
             case OP_MOVE: {
                 int64_t b_off = b * sizeof(Value);
                 MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, r_addr), MIR_new_reg_op(ctx, saved_regs_reg), MIR_new_int_op(ctx, b_off)));
-                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_CALL, MIR_new_ref_op(ctx, proto_helper1), MIR_new_ref_op(ctx, import_move), MIR_new_reg_op(ctx, r_res), MIR_new_reg_op(ctx, saved_vm_reg), MIR_new_reg_op(ctx, r_addr)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_call_insn(ctx, 5, MIR_new_ref_op(ctx, proto_helper1), MIR_new_ref_op(ctx, import_move), MIR_new_reg_op(ctx, r_res), MIR_new_reg_op(ctx, saved_vm_reg), MIR_new_reg_op(ctx, r_addr)));
                 int64_t a_off = a * sizeof(Value);
                 MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, r_addr), MIR_new_reg_op(ctx, saved_regs_reg), MIR_new_int_op(ctx, a_off)));
                 MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_MOV, MIR_new_mem_op(ctx, MIR_T_I64, 0, r_addr, 0, 1), MIR_new_reg_op(ctx, r_res)));
@@ -155,7 +236,63 @@ bool kvm_jit_compile_function(KvmJitContext *jctx, KvmFunction *fn) {
                 MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, r_val0), MIR_new_mem_op(ctx, MIR_T_I64, 0, r_addr, 0, 1)));
                 MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, r_addr), MIR_new_reg_op(ctx, saved_regs_reg), MIR_new_int_op(ctx, c_off)));
                 MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, r_val1), MIR_new_mem_op(ctx, MIR_T_I64, 0, r_addr, 0, 1)));
-                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_CALL, MIR_new_ref_op(ctx, proto_helper2), MIR_new_ref_op(ctx, import_add), MIR_new_reg_op(ctx, r_res), MIR_new_reg_op(ctx, saved_vm_reg), MIR_new_reg_op(ctx, r_val0), MIR_new_reg_op(ctx, r_val1)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_call_insn(ctx, 6, MIR_new_ref_op(ctx, proto_helper2), MIR_new_ref_op(ctx, import_add), MIR_new_reg_op(ctx, r_res), MIR_new_reg_op(ctx, saved_vm_reg), MIR_new_reg_op(ctx, r_val0), MIR_new_reg_op(ctx, r_val1)));
+                int64_t a_off = a * sizeof(Value);
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, r_addr), MIR_new_reg_op(ctx, saved_regs_reg), MIR_new_int_op(ctx, a_off)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_MOV, MIR_new_mem_op(ctx, MIR_T_I64, 0, r_addr, 0, 1), MIR_new_reg_op(ctx, r_res)));
+                break;
+            }
+            case OP_SUB:
+            case OP_ISUB: {
+                int64_t b_off = b * sizeof(Value);
+                int64_t c_off = c * sizeof(Value);
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, r_addr), MIR_new_reg_op(ctx, saved_regs_reg), MIR_new_int_op(ctx, b_off)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, r_val0), MIR_new_mem_op(ctx, MIR_T_I64, 0, r_addr, 0, 1)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, r_addr), MIR_new_reg_op(ctx, saved_regs_reg), MIR_new_int_op(ctx, c_off)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, r_val1), MIR_new_mem_op(ctx, MIR_T_I64, 0, r_addr, 0, 1)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_call_insn(ctx, 6, MIR_new_ref_op(ctx, proto_helper2), MIR_new_ref_op(ctx, import_sub), MIR_new_reg_op(ctx, r_res), MIR_new_reg_op(ctx, saved_vm_reg), MIR_new_reg_op(ctx, r_val0), MIR_new_reg_op(ctx, r_val1)));
+                int64_t a_off = a * sizeof(Value);
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, r_addr), MIR_new_reg_op(ctx, saved_regs_reg), MIR_new_int_op(ctx, a_off)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_MOV, MIR_new_mem_op(ctx, MIR_T_I64, 0, r_addr, 0, 1), MIR_new_reg_op(ctx, r_res)));
+                break;
+            }
+            case OP_MUL:
+            case OP_IMUL: {
+                int64_t b_off = b * sizeof(Value);
+                int64_t c_off = c * sizeof(Value);
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, r_addr), MIR_new_reg_op(ctx, saved_regs_reg), MIR_new_int_op(ctx, b_off)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, r_val0), MIR_new_mem_op(ctx, MIR_T_I64, 0, r_addr, 0, 1)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, r_addr), MIR_new_reg_op(ctx, saved_regs_reg), MIR_new_int_op(ctx, c_off)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, r_val1), MIR_new_mem_op(ctx, MIR_T_I64, 0, r_addr, 0, 1)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_call_insn(ctx, 6, MIR_new_ref_op(ctx, proto_helper2), MIR_new_ref_op(ctx, import_mul), MIR_new_reg_op(ctx, r_res), MIR_new_reg_op(ctx, saved_vm_reg), MIR_new_reg_op(ctx, r_val0), MIR_new_reg_op(ctx, r_val1)));
+                int64_t a_off = a * sizeof(Value);
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, r_addr), MIR_new_reg_op(ctx, saved_regs_reg), MIR_new_int_op(ctx, a_off)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_MOV, MIR_new_mem_op(ctx, MIR_T_I64, 0, r_addr, 0, 1), MIR_new_reg_op(ctx, r_res)));
+                break;
+            }
+            case OP_DIV:
+            case OP_IDIV: {
+                int64_t b_off = b * sizeof(Value);
+                int64_t c_off = c * sizeof(Value);
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, r_addr), MIR_new_reg_op(ctx, saved_regs_reg), MIR_new_int_op(ctx, b_off)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, r_val0), MIR_new_mem_op(ctx, MIR_T_I64, 0, r_addr, 0, 1)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, r_addr), MIR_new_reg_op(ctx, saved_regs_reg), MIR_new_int_op(ctx, c_off)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, r_val1), MIR_new_mem_op(ctx, MIR_T_I64, 0, r_addr, 0, 1)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_call_insn(ctx, 6, MIR_new_ref_op(ctx, proto_helper2), MIR_new_ref_op(ctx, import_div), MIR_new_reg_op(ctx, r_res), MIR_new_reg_op(ctx, saved_vm_reg), MIR_new_reg_op(ctx, r_val0), MIR_new_reg_op(ctx, r_val1)));
+                int64_t a_off = a * sizeof(Value);
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, r_addr), MIR_new_reg_op(ctx, saved_regs_reg), MIR_new_int_op(ctx, a_off)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_MOV, MIR_new_mem_op(ctx, MIR_T_I64, 0, r_addr, 0, 1), MIR_new_reg_op(ctx, r_res)));
+                break;
+            }
+            case OP_MOD:
+            case OP_IMOD: {
+                int64_t b_off = b * sizeof(Value);
+                int64_t c_off = c * sizeof(Value);
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, r_addr), MIR_new_reg_op(ctx, saved_regs_reg), MIR_new_int_op(ctx, b_off)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, r_val0), MIR_new_mem_op(ctx, MIR_T_I64, 0, r_addr, 0, 1)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, r_addr), MIR_new_reg_op(ctx, saved_regs_reg), MIR_new_int_op(ctx, c_off)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, r_val1), MIR_new_mem_op(ctx, MIR_T_I64, 0, r_addr, 0, 1)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_call_insn(ctx, 6, MIR_new_ref_op(ctx, proto_helper2), MIR_new_ref_op(ctx, import_mod), MIR_new_reg_op(ctx, r_res), MIR_new_reg_op(ctx, saved_vm_reg), MIR_new_reg_op(ctx, r_val0), MIR_new_reg_op(ctx, r_val1)));
                 int64_t a_off = a * sizeof(Value);
                 MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, r_addr), MIR_new_reg_op(ctx, saved_regs_reg), MIR_new_int_op(ctx, a_off)));
                 MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_MOV, MIR_new_mem_op(ctx, MIR_T_I64, 0, r_addr, 0, 1), MIR_new_reg_op(ctx, r_res)));
@@ -186,6 +323,22 @@ bool kvm_jit_compile_function(KvmJitContext *jctx, KvmFunction *fn) {
                 MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_MOV, MIR_new_mem_op(ctx, MIR_T_I64, 0, r_addr, 0, 1), MIR_new_reg_op(ctx, r_res)));
                 break;
             }
+            case OP_CALL: {
+                int64_t b_off = b * sizeof(Value);
+                int64_t args_off = (b + 1) * sizeof(Value);
+
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, r_addr), MIR_new_reg_op(ctx, saved_regs_reg), MIR_new_int_op(ctx, b_off)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, r_val0), MIR_new_mem_op(ctx, MIR_T_I64, 0, r_addr, 0, 1)));
+
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, r_val1), MIR_new_reg_op(ctx, saved_regs_reg), MIR_new_int_op(ctx, args_off)));
+
+                MIR_append_insn(ctx, mir_func_item, MIR_new_call_insn(ctx, 7, MIR_new_ref_op(ctx, proto_call), MIR_new_ref_op(ctx, import_call), MIR_new_reg_op(ctx, r_res), MIR_new_reg_op(ctx, saved_vm_reg), MIR_new_reg_op(ctx, r_val0), MIR_new_reg_op(ctx, r_val1), MIR_new_int_op(ctx, (int64_t)c)));
+
+                int64_t a_off = a * sizeof(Value);
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, r_addr), MIR_new_reg_op(ctx, saved_regs_reg), MIR_new_int_op(ctx, a_off)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_MOV, MIR_new_mem_op(ctx, MIR_T_I64, 0, r_addr, 0, 1), MIR_new_reg_op(ctx, r_res)));
+                break;
+            }
             case OP_JMP: {
                 size_t target_pc = pc + 1 + simm;
                 if (target_pc < fn->code_count) {
@@ -193,9 +346,13 @@ bool kvm_jit_compile_function(KvmJitContext *jctx, KvmFunction *fn) {
                 }
                 break;
             }
-            case OP_JLT: {
-                int64_t a_off = a * sizeof(Value);
-                int64_t b_off = b * sizeof(Value);
+            case OP_JLE: {
+                uint8_t cmp_a = KVM_CMP_REG_A(inst);
+                uint8_t cmp_b = KVM_CMP_REG_B(inst);
+                int16_t cmp_simm = KVM_CMP_SIMM16(inst);
+
+                int64_t a_off = cmp_a * sizeof(Value);
+                int64_t b_off = cmp_b * sizeof(Value);
                 MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, r_addr), MIR_new_reg_op(ctx, saved_regs_reg), MIR_new_int_op(ctx, a_off)));
                 MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, r_val0), MIR_new_mem_op(ctx, MIR_T_I64, 0, r_addr, 0, 1)));
                 MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, r_addr), MIR_new_reg_op(ctx, saved_regs_reg), MIR_new_int_op(ctx, b_off)));
@@ -207,7 +364,31 @@ bool kvm_jit_compile_function(KvmJitContext *jctx, KvmFunction *fn) {
                 MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_LSH, MIR_new_reg_op(ctx, r_val1), MIR_new_reg_op(ctx, r_val1), MIR_new_int_op(ctx, 16)));
                 MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_RSH, MIR_new_reg_op(ctx, r_val1), MIR_new_reg_op(ctx, r_val1), MIR_new_int_op(ctx, 16)));
 
-                size_t target_pc = pc + 1 + simm;
+                size_t target_pc = pc + 1 + cmp_simm;
+                if (target_pc < fn->code_count) {
+                    MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_BLE, MIR_new_label_op(ctx, labels[target_pc]), MIR_new_reg_op(ctx, r_val0), MIR_new_reg_op(ctx, r_val1)));
+                }
+                break;
+            }
+            case OP_JLT: {
+                uint8_t cmp_a = KVM_CMP_REG_A(inst);
+                uint8_t cmp_b = KVM_CMP_REG_B(inst);
+                int16_t cmp_simm = KVM_CMP_SIMM16(inst);
+
+                int64_t a_off = cmp_a * sizeof(Value);
+                int64_t b_off = cmp_b * sizeof(Value);
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, r_addr), MIR_new_reg_op(ctx, saved_regs_reg), MIR_new_int_op(ctx, a_off)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, r_val0), MIR_new_mem_op(ctx, MIR_T_I64, 0, r_addr, 0, 1)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, r_addr), MIR_new_reg_op(ctx, saved_regs_reg), MIR_new_int_op(ctx, b_off)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, r_val1), MIR_new_mem_op(ctx, MIR_T_I64, 0, r_addr, 0, 1)));
+
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_LSH, MIR_new_reg_op(ctx, r_val0), MIR_new_reg_op(ctx, r_val0), MIR_new_int_op(ctx, 16)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_RSH, MIR_new_reg_op(ctx, r_val0), MIR_new_reg_op(ctx, r_val0), MIR_new_int_op(ctx, 16)));
+
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_LSH, MIR_new_reg_op(ctx, r_val1), MIR_new_reg_op(ctx, r_val1), MIR_new_int_op(ctx, 16)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_RSH, MIR_new_reg_op(ctx, r_val1), MIR_new_reg_op(ctx, r_val1), MIR_new_int_op(ctx, 16)));
+
+                size_t target_pc = pc + 1 + cmp_simm;
                 if (target_pc < fn->code_count) {
                     MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_BLT, MIR_new_label_op(ctx, labels[target_pc]), MIR_new_reg_op(ctx, r_val0), MIR_new_reg_op(ctx, r_val1)));
                 }
@@ -217,15 +398,20 @@ bool kvm_jit_compile_function(KvmJitContext *jctx, KvmFunction *fn) {
                 int64_t a_off = a * sizeof(Value);
                 MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, r_addr), MIR_new_reg_op(ctx, saved_regs_reg), MIR_new_int_op(ctx, a_off)));
                 MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, r_res), MIR_new_mem_op(ctx, MIR_T_I64, 0, r_addr, 0, 1)));
-                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_RET, MIR_new_reg_op(ctx, r_res)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_ret_insn(ctx, 1, MIR_new_reg_op(ctx, r_res)));
                 break;
             }
             case OP_DROP: {
                 int64_t a_off = a * sizeof(Value);
                 MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, r_addr), MIR_new_reg_op(ctx, saved_regs_reg), MIR_new_int_op(ctx, a_off)));
                 MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, r_val0), MIR_new_mem_op(ctx, MIR_T_I64, 0, r_addr, 0, 1)));
-                MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_CALL, MIR_new_ref_op(ctx, proto_helper1), MIR_new_ref_op(ctx, import_drop), MIR_new_reg_op(ctx, r_res), MIR_new_reg_op(ctx, saved_vm_reg), MIR_new_reg_op(ctx, r_val0)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_call_insn(ctx, 5, MIR_new_ref_op(ctx, proto_helper1), MIR_new_ref_op(ctx, import_drop), MIR_new_reg_op(ctx, r_res), MIR_new_reg_op(ctx, saved_vm_reg), MIR_new_reg_op(ctx, r_val0)));
                 MIR_append_insn(ctx, mir_func_item, MIR_new_insn(ctx, MIR_MOV, MIR_new_mem_op(ctx, MIR_T_I64, 0, r_addr, 0, 1), MIR_new_int_op(ctx, NIL_VAL)));
+                break;
+            }
+            case OP_TRAP: {
+                MIR_append_insn(ctx, mir_func_item, MIR_new_call_insn(ctx, 5, MIR_new_ref_op(ctx, proto_helper1), MIR_new_ref_op(ctx, import_trap), MIR_new_reg_op(ctx, r_res), MIR_new_reg_op(ctx, saved_vm_reg), MIR_new_int_op(ctx, (int64_t)pc)));
+                MIR_append_insn(ctx, mir_func_item, MIR_new_ret_insn(ctx, 1, MIR_new_int_op(ctx, NIL_VAL)));
                 break;
             }
             default: {
