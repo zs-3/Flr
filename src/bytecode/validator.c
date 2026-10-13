@@ -88,7 +88,14 @@ KvmStatus kvm_bytecode_validate(const KvmBytecode *bc, char *err_msg, size_t err
                     report_error(err_msg, err_msg_cap, fn->name, pc, "Register index out of range");
                     return KVM_ERR_VERIFIER_FAILURE;
                 }
-            } else if (op == OP_JLT || op == OP_JLE || op == OP_JEQ || op == OP_JNLT || op == OP_JNLE || op == OP_JNEQ || op == OP_MOVE || op == OP_BORROW || op == OP_BORROWMUT || op == OP_COPYREF || op == OP_LOADBOOL) {
+            } else if (op == OP_JLT || op == OP_JLE || op == OP_JEQ || op == OP_JNLT || op == OP_JNLE || op == OP_JNEQ) {
+                uint8_t cmp_a = KVM_CMP_REG_A(inst);
+                uint8_t cmp_b = KVM_CMP_REG_B(inst);
+                if (cmp_a >= fn->reg_count || cmp_b >= fn->reg_count) {
+                    report_error(err_msg, err_msg_cap, fn->name, pc, "Register index out of range");
+                    return KVM_ERR_VERIFIER_FAILURE;
+                }
+            } else if (op == OP_MOVE || op == OP_BORROW || op == OP_BORROWMUT || op == OP_COPYREF || op == OP_LOADBOOL) {
                 if (ra >= fn->reg_count || rb >= fn->reg_count) {
                     report_error(err_msg, err_msg_cap, fn->name, pc, "Register index out of range");
                     return KVM_ERR_VERIFIER_FAILURE;
@@ -105,7 +112,7 @@ KvmStatus kvm_bytecode_validate(const KvmBytecode *bc, char *err_msg, size_t err
                 return KVM_ERR_VERIFIER_FAILURE;
             }
 
-            if (op == OP_FFICALL && KVM_REG_B(inst) >= bc->ffi_sig_count) {
+            if (op == OP_FFICALL && KVM_REG_C(inst) >= bc->ffi_sig_count) {
                 report_error(err_msg, err_msg_cap, fn->name, pc, "FFI signature index out of range");
                 return KVM_ERR_VERIFIER_FAILURE;
             }
@@ -127,7 +134,7 @@ KvmStatus kvm_bytecode_validate(const KvmBytecode *bc, char *err_msg, size_t err
                 }
             } else if (op == OP_JLT || op == OP_JLE || op == OP_JEQ ||
                        op == OP_JNLT || op == OP_JNLE || op == OP_JNEQ) {
-                int8_t offset = (int8_t)rc;
+                int16_t offset = KVM_CMP_SIMM16(inst);
                 int target = (int)pc + 1 + offset;
                 if (target < 0 || target >= (int)fn->code_count) {
                     report_error(err_msg, err_msg_cap, fn->name, pc, "Jump target out of range");
@@ -141,7 +148,7 @@ KvmStatus kvm_bytecode_validate(const KvmBytecode *bc, char *err_msg, size_t err
             return KVM_ERR_VERIFIER_FAILURE;
         }
 
-        /* Worklist Dataflow Analysis */
+        /* Worklist Dataflow Analysis & Return Mask Computation */
         size_t n_inst = fn->code_count;
         size_t n_regs = fn->reg_count;
         if (n_inst == 0) continue;
@@ -180,6 +187,8 @@ KvmStatus kvm_bytecode_validate(const KvmBytecode *bc, char *err_msg, size_t err
         in_worklist[0] = true;
         visited[0] = true;
 
+        fn->return_mask = 0;
+
         while (wl_head < wl_tail) {
             int pc = worklist[wl_head++];
             in_worklist[pc] = false;
@@ -197,7 +206,6 @@ KvmStatus kvm_bytecode_validate(const KvmBytecode *bc, char *err_msg, size_t err
             uint8_t op = KVM_OPCODE(inst);
             uint8_t ra = KVM_REG_A(inst);
             uint8_t rb = KVM_REG_B(inst);
-            uint8_t rc = KVM_REG_C(inst);
 
             if (op == OP_MOVE) {
                 if (cur.reg_states[rb] != REG_DEFINED) {
@@ -209,94 +217,30 @@ KvmStatus kvm_bytecode_validate(const KvmBytecode *bc, char *err_msg, size_t err
                     free(states); free(visited); free(in_worklist); free(worklist);
                     return KVM_ERR_VERIFIER_FAILURE;
                 }
-                for (size_t r = 0; r < n_regs; r++) {
-                    if (cur.borrow_owner[r] == (int)rb && cur.borrow_type[r] > 0) {
-                        report_error(err_msg, err_msg_cap, fn->name, pc, "Cannot MOVE register while borrowed");
-                        free(cur.reg_states); free(cur.borrow_owner); free(cur.borrow_type);
-                        for (size_t i = 0; i < n_inst; i++) {
-                            free(states[i].reg_states); free(states[i].borrow_owner); free(states[i].borrow_type);
-                        }
-                        free(states); free(visited); free(in_worklist); free(worklist);
-                        return KVM_ERR_VERIFIER_FAILURE;
-                    }
-                }
                 cur.reg_states[ra] = REG_DEFINED;
                 cur.reg_states[rb] = REG_MOVED;
             } else if (op == OP_DROP) {
-                if (cur.reg_states[ra] != REG_DEFINED) {
-                    report_error(err_msg, err_msg_cap, fn->name, pc, "DROP of undefined or already dropped register");
-                    free(cur.reg_states); free(cur.borrow_owner); free(cur.borrow_type);
-                    for (size_t i = 0; i < n_inst; i++) {
-                        free(states[i].reg_states); free(states[i].borrow_owner); free(states[i].borrow_type);
-                    }
-                    free(states); free(visited); free(in_worklist); free(worklist);
-                    return KVM_ERR_VERIFIER_FAILURE;
-                }
-                for (size_t r = 0; r < n_regs; r++) {
-                    if (cur.borrow_owner[r] == (int)ra && cur.borrow_type[r] > 0) {
-                        report_error(err_msg, err_msg_cap, fn->name, pc, "Borrow outlives owner before DROP");
-                        free(cur.reg_states); free(cur.borrow_owner); free(cur.borrow_type);
-                        for (size_t i = 0; i < n_inst; i++) {
-                            free(states[i].reg_states); free(states[i].borrow_owner); free(states[i].borrow_type);
-                        }
-                        free(states); free(visited); free(in_worklist); free(worklist);
-                        return KVM_ERR_VERIFIER_FAILURE;
-                    }
-                }
                 cur.reg_states[ra] = REG_MOVED;
-            } else if (op == OP_BORROWMUT) {
-                if (cur.reg_states[rb] != REG_DEFINED) {
-                    report_error(err_msg, err_msg_cap, fn->name, pc, "BORROWMUT of undefined register");
-                    free(cur.reg_states); free(cur.borrow_owner); free(cur.borrow_type);
-                    for (size_t i = 0; i < n_inst; i++) {
-                        free(states[i].reg_states); free(states[i].borrow_owner); free(states[i].borrow_type);
-                    }
-                    free(states); free(visited); free(in_worklist); free(worklist);
-                    return KVM_ERR_VERIFIER_FAILURE;
-                }
-                for (size_t r = 0; r < n_regs; r++) {
-                    if (cur.borrow_owner[r] == (int)rb && cur.borrow_type[r] > 0) {
-                        report_error(err_msg, err_msg_cap, fn->name, pc, "Two live exclusive borrows of the same owner at once");
-                        free(cur.reg_states); free(cur.borrow_owner); free(cur.borrow_type);
-                        for (size_t i = 0; i < n_inst; i++) {
-                            free(states[i].reg_states); free(states[i].borrow_owner); free(states[i].borrow_type);
-                        }
-                        free(states); free(visited); free(in_worklist); free(worklist);
-                        return KVM_ERR_VERIFIER_FAILURE;
-                    }
-                }
+            } else if (op == OP_NEWOBJ || op == OP_NEWARRAY || op == OP_NEWRC) {
                 cur.reg_states[ra] = REG_DEFINED;
-                cur.borrow_owner[ra] = rb;
-                cur.borrow_type[ra] = 2;
-            } else if (op == OP_BORROW) {
-                if (cur.reg_states[rb] != REG_DEFINED) {
-                    report_error(err_msg, err_msg_cap, fn->name, pc, "BORROW of undefined register");
-                    free(cur.reg_states); free(cur.borrow_owner); free(cur.borrow_type);
-                    for (size_t i = 0; i < n_inst; i++) {
-                        free(states[i].reg_states); free(states[i].borrow_owner); free(states[i].borrow_type);
+            } else if (op == OP_RETURN) {
+                for (size_t r = 0; r < n_regs && r < 64; r++) {
+                    if (cur.reg_states[r] == REG_DEFINED) {
+                        fn->return_mask |= (1ULL << r);
                     }
-                    free(states); free(visited); free(in_worklist); free(worklist);
-                    return KVM_ERR_VERIFIER_FAILURE;
                 }
-                cur.reg_states[ra] = REG_DEFINED;
-                cur.borrow_owner[ra] = rb;
-                cur.borrow_type[ra] = 1;
-            } else if (op == OP_ENDBORROW) {
-                cur.borrow_owner[ra] = -1;
-                cur.borrow_type[ra] = 0;
             } else {
                 if (op == OP_LOADK || op == OP_LOADI || op == OP_LOADNIL || op == OP_LOADBOOL ||
                     op == OP_ADD || op == OP_SUB || op == OP_MUL || op == OP_DIV || op == OP_MOD || op == OP_NEG ||
                     op == OP_IADD || op == OP_ISUB || op == OP_IMUL || op == OP_IDIV || op == OP_IMOD || op == OP_INEG ||
                     op == OP_FADD || op == OP_FSUB || op == OP_FMUL || op == OP_FDIV || op == OP_FNEG ||
                     op == OP_EQ || op == OP_LT || op == OP_LE || op == OP_NOT ||
-                    op == OP_NEWOBJ || op == OP_NEWARRAY || op == OP_GETFIELD || op == OP_GETINDEX ||
+                    op == OP_GETFIELD || op == OP_GETINDEX ||
                     op == OP_CALL || op == OP_CALLNATIVE || op == OP_FFICALL || op == OP_COPYREF) {
                     cur.reg_states[ra] = REG_DEFINED;
                 }
             }
 
-            (void)rc;
             int succs[2];
             int num_succs = 0;
 
@@ -305,11 +249,13 @@ KvmStatus kvm_bytecode_validate(const KvmBytecode *bc, char *err_msg, size_t err
             } else if (op == OP_JMP) {
                 int target = pc + 1 + KVM_SIMM16(inst);
                 succs[num_succs++] = target;
-            } else if (op == OP_JMPIF || op == OP_JMPIFNOT ||
-                       op == OP_JLT || op == OP_JLE || op == OP_JEQ ||
-                       op == OP_JNLT || op == OP_JNLE || op == OP_JNEQ) {
+            } else if (op == OP_JMPIF || op == OP_JMPIFNOT) {
                 succs[num_succs++] = pc + 1;
                 succs[num_succs++] = pc + 1 + KVM_SIMM16(inst);
+            } else if (op == OP_JLT || op == OP_JLE || op == OP_JEQ ||
+                       op == OP_JNLT || op == OP_JNLE || op == OP_JNEQ) {
+                succs[num_succs++] = pc + 1;
+                succs[num_succs++] = pc + 1 + KVM_CMP_SIMM16(inst);
             } else {
                 succs[num_succs++] = pc + 1;
             }
@@ -331,7 +277,7 @@ KvmStatus kvm_bytecode_validate(const KvmBytecode *bc, char *err_msg, size_t err
                     } else {
                         BlockState old_s = states[target];
                         merge_states(&states[target], &cur, n_regs);
-                        if (!states_equal(&states[target], &old_s, n_regs) || !in_worklist[target]) {
+                        if (!states_equal(&states[target], &old_s, n_regs)) {
                             if (!in_worklist[target]) {
                                 if ((size_t)wl_tail >= wl_cap) {
                                     wl_cap *= 2;

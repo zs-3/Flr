@@ -154,6 +154,8 @@ typedef struct KvmFunction {
     uint32_t loop_count;
     uint32_t *loop_counters;
 
+    uint64_t return_mask;
+
     void *jit_code;
     bool interp_only;
     uint32_t deopt_count;

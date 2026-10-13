@@ -9,7 +9,7 @@
 
 KvmVMConfig kvm_vm_default_config(void) {
     KvmVMConfig config;
-    config.initial_stack_size = 1024;
+    config.initial_stack_size = 65536; // 64K value slots
     config.enable_jit = true;
     config.jit_threshold = 1000;
     config.jit_loop_threshold = 500;
@@ -33,6 +33,7 @@ KvmVM *kvm_vm_create(const KvmVMConfig *config) {
     if (!vm) return NULL;
 
     vm->config = cfg;
+    vm->last_status = KVM_OK;
     kvm_allocator_init(&vm->allocator);
     kvm_ffi_table_init(&vm->ffi_table);
 
@@ -43,6 +44,7 @@ KvmVM *kvm_vm_create(const KvmVMConfig *config) {
         free(vm);
         return NULL;
     }
+    vm->stack_top = 0;
 
     return vm;
 }
@@ -59,9 +61,31 @@ void kvm_vm_destroy(KvmVM *vm) {
     free(vm);
 }
 
+Value *kvm_vm_reserve_stack(KvmVM *vm, size_t needed) {
+    if (vm->stack_top + needed > vm->stack_capacity) {
+        size_t new_cap = vm->stack_capacity * 2;
+        while (vm->stack_top + needed > new_cap) {
+            new_cap *= 2;
+        }
+        Value *new_stack = realloc(vm->stack, new_cap * sizeof(Value));
+        if (!new_stack) return NULL;
+        memset(new_stack + vm->stack_capacity, 0, (new_cap - vm->stack_capacity) * sizeof(Value));
+        vm->stack = new_stack;
+        vm->stack_capacity = new_cap;
+    }
+    return &vm->stack[vm->stack_top];
+}
+
 KvmStatus kvm_vm_load_bytecode(KvmVM *vm, const KvmBytecode *bc) {
     if (!vm || !bc) return KVM_ERR_INVALID_ARGUMENT;
     vm->bytecode = (KvmBytecode *)bc;
+    /* Run validator to ensure return_mask and static validation are populated */
+    char err[256];
+    KvmStatus status = kvm_bytecode_validate(bc, err, sizeof(err));
+    if (status != KVM_OK) {
+        kvm_vm_set_error(vm, status, "%s", err);
+        return status;
+    }
     return KVM_OK;
 }
 
@@ -69,12 +93,15 @@ const char *kvm_vm_get_last_error(KvmVM *vm) {
     return vm ? vm->last_error : "Null VM handle";
 }
 
-void kvm_vm_set_error(KvmVM *vm, const char *fmt, ...) {
+void kvm_vm_set_error(KvmVM *vm, KvmStatus status, const char *fmt, ...) {
     if (!vm) return;
-    va_list args;
-    va_start(args, fmt);
-    vsnprintf(vm->last_error, sizeof(vm->last_error), fmt, args);
-    va_end(args);
+    vm->last_status = status;
+    if (fmt) {
+        va_list args;
+        va_start(args, fmt);
+        vsnprintf(vm->last_error, sizeof(vm->last_error), fmt, args);
+        va_end(args);
+    }
 }
 
 void kvm_vm_get_stats(const KvmVM *vm, KvmVMStats *stats) {
@@ -96,10 +123,14 @@ KvmBytecode *kvm_vm_get_bytecode(KvmVM *vm) {
 KvmStatus kvm_vm_run_entry(KvmVM *vm, Value *out_result) {
     if (!vm || !vm->bytecode) return KVM_ERR_INVALID_ARGUMENT;
     if (vm->bytecode->entry_func_idx >= vm->bytecode->func_count) {
-        kvm_vm_set_error(vm, "Entry function index out of bounds");
+        kvm_vm_set_error(vm, KVM_ERR_CORRUPT_BYTECODE, "Entry function index out of bounds");
         return KVM_ERR_CORRUPT_BYTECODE;
     }
 
     KvmFunction *fn = vm->bytecode->functions[vm->bytecode->entry_func_idx];
-    return kvm_vm_run_function(vm, fn, NULL, 0, out_result);
+    vm->stack_top = 0;
+    Value *entry_regs = kvm_vm_reserve_stack(vm, fn->reg_count > 0 ? fn->reg_count : 16);
+    if (!entry_regs) return KVM_ERR_OUT_OF_MEMORY;
+
+    return kvm_vm_run_function(vm, fn, entry_regs, out_result);
 }

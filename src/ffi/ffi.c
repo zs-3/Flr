@@ -78,7 +78,7 @@ KvmStatus kvm_load_library(KvmVM *vm, const char *path) {
     if (!vm || !path) return KVM_ERR_INVALID_ARGUMENT;
     void *handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
     if (!handle) {
-        kvm_vm_set_error(vm, "Failed to load library '%s': %s", path, dlerror());
+        kvm_vm_set_error(vm, KVM_ERR_FFI_SYMBOL_NOT_FOUND, "Failed to load library '%s': %s", path, dlerror());
         return KVM_ERR_FFI_SYMBOL_NOT_FOUND;
     }
     KvmFfiTable *t = &vm->ffi_table;
@@ -145,7 +145,7 @@ KvmStatus kvm_ffi_call(KvmVM *vm, const char *symbol_name, const char *signature
     }
 
     if (!sym) {
-        kvm_vm_set_error(vm, "FFI symbol '%s' not found", symbol_name);
+        kvm_vm_set_error(vm, KVM_ERR_FFI_SYMBOL_NOT_FOUND, "FFI symbol '%s' not found", symbol_name);
         return KVM_ERR_FFI_SYMBOL_NOT_FOUND;
     }
 

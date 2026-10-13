@@ -7,30 +7,20 @@
 #include <stdlib.h>
 #include <math.h>
 
-extern KvmStatus kvm_interp_execute(KvmVM *vm, KvmFunction *fn, Value *args, uint16_t arg_count, Value *out_result);
+extern KvmStatus kvm_interp_execute(KvmVM *vm, KvmFunction *fn, Value *regs, Value *out_result);
 
-KvmStatus kvm_vm_run_function(KvmVM *vm, KvmFunction *fn, Value *args, uint16_t arg_count, Value *out_result) {
-    return kvm_interp_execute(vm, fn, args, arg_count, out_result);
+KvmStatus kvm_vm_run_function(KvmVM *vm, KvmFunction *fn, Value *regs, Value *out_result) {
+    return kvm_interp_execute(vm, fn, regs, out_result);
 }
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
 
-KvmStatus kvm_interp_execute(KvmVM *vm, KvmFunction *fn, Value *args, uint16_t arg_count, Value *out_result) {
-    if (!vm || !fn) return KVM_ERR_INVALID_ARGUMENT;
+KvmStatus kvm_interp_execute(KvmVM *vm, KvmFunction *fn, Value *regs, Value *out_result) {
+    if (!vm || !fn || !regs) return KVM_ERR_INVALID_ARGUMENT;
 
     KvmAllocator *alloc = kvm_vm_get_allocator(vm);
     size_t reg_count = fn->reg_count > 0 ? fn->reg_count : 16;
-    Value *regs = calloc(reg_count, sizeof(Value));
-    if (!regs) return KVM_ERR_OUT_OF_MEMORY;
-
-    for (size_t i = 0; i < reg_count; i++) {
-        regs[i] = NIL_VAL;
-    }
-
-    for (uint16_t i = 0; i < arg_count && i < reg_count; i++) {
-        regs[i] = args[i];
-    }
 
     fn->entry_count++;
 
@@ -50,18 +40,17 @@ KvmStatus kvm_interp_execute(KvmVM *vm, KvmFunction *fn, Value *args, uint16_t a
             Value jres = kvm_jit_call(fn, vm, regs);
             if (out_result) *out_result = jres;
 
-            for (size_t i = 0; i < reg_count; i++) {
-                if (IS_POINTER(regs[i]) && (!IS_POINTER(jres) || VALUE_TO_HEAP_OBJ(regs[i]) != VALUE_TO_HEAP_OBJ(jres))) {
-                    kvm_ownership_drop(alloc, VALUE_TO_HEAP_OBJ(regs[i]));
-                    regs[i] = NIL_VAL;
+            if (fn->return_mask != 0) {
+                for (size_t i = 0; i < reg_count; i++) {
+                    if ((fn->return_mask & (1ULL << i)) != 0 && IS_POINTER(regs[i]) && (!IS_POINTER(jres) || VALUE_TO_HEAP_OBJ(regs[i]) != VALUE_TO_HEAP_OBJ(jres))) {
+                        kvm_ownership_drop(alloc, VALUE_TO_HEAP_OBJ(regs[i]));
+                        regs[i] = NIL_VAL;
+                    }
                 }
             }
-            free(regs);
 
-            const char *err = kvm_vm_get_last_error(vm);
-            if (err && err[0] != '\0') {
-                if (strstr(err, "Division by zero")) return KVM_ERR_DIV_BY_ZERO;
-                if (strstr(err, "trap") || strstr(err, "Trap")) return KVM_ERR_VERIFIER_FAILURE;
+            if (vm->last_status != KVM_OK) {
+                return vm->last_status;
             }
             return KVM_OK;
         }
@@ -284,8 +273,7 @@ case OP_IDIV: {
     uint8_t c = KVM_REG_C(inst);
     int64_t d = VALUE_TO_INT48(regs[c]);
     if (d == 0) {
-        kvm_vm_set_error(vm, "Division by zero");
-        free(regs);
+        kvm_vm_set_error(vm, KVM_ERR_DIV_BY_ZERO, "Division by zero");
         return KVM_ERR_DIV_BY_ZERO;
     }
     regs[a] = INT48_VAL(VALUE_TO_INT48(regs[b]) / d);
@@ -306,8 +294,7 @@ case OP_IMOD: {
     uint8_t c = KVM_REG_C(inst);
     int64_t d = VALUE_TO_INT48(regs[c]);
     if (d == 0) {
-        kvm_vm_set_error(vm, "Modulo by zero");
-        free(regs);
+        kvm_vm_set_error(vm, KVM_ERR_DIV_BY_ZERO, "Modulo by zero");
         return KVM_ERR_DIV_BY_ZERO;
     }
     regs[a] = INT48_VAL(VALUE_TO_INT48(regs[b]) % d);
@@ -570,16 +557,14 @@ case OP_CALL: {
     KvmInstruction inst = code[pc];
     uint8_t a = KVM_REG_A(inst);
     uint8_t b = KVM_REG_B(inst);
-    uint8_t c = KVM_REG_C(inst);
     Value func_val = regs[b];
     if (IS_INT48(func_val)) {
         uint32_t fidx = (uint32_t)VALUE_TO_INT48(func_val);
         if (bc && fidx < bc->func_count) {
             KvmFunction *callee = bc->functions[fidx];
-            Value res;
-            KvmStatus status = kvm_vm_run_function(vm, callee, &regs[b + 1], c, &res);
+            Value res = NIL_VAL;
+            KvmStatus status = kvm_vm_run_function(vm, callee, &regs[b + 1], &res);
             if (status != KVM_OK) {
-                free(regs);
                 return status;
             }
             regs[a] = res;
@@ -599,13 +584,16 @@ case OP_RETURN: {
     Value ret_val = regs[a];
     if (out_result) *out_result = ret_val;
 
-    for (size_t i = 0; i < reg_count; i++) {
-        if (i != a && IS_POINTER(regs[i]) && (!IS_POINTER(ret_val) || VALUE_TO_HEAP_OBJ(regs[i]) != VALUE_TO_HEAP_OBJ(ret_val))) {
-            kvm_ownership_drop(alloc, VALUE_TO_HEAP_OBJ(regs[i]));
-            regs[i] = NIL_VAL;
+    for (size_t i = reg_count; i > 0; i--) {
+        size_t idx = i - 1;
+        if (idx == a) continue;
+        Value v = regs[idx];
+        if (IS_POINTER(v) && (!IS_POINTER(ret_val) || VALUE_TO_HEAP_OBJ(v) != VALUE_TO_HEAP_OBJ(ret_val))) {
+            kvm_ownership_drop(alloc, VALUE_TO_HEAP_OBJ(v));
+            regs[idx] = NIL_VAL;
+            vm->frame_exit_sweep_count++;
         }
     }
-    free(regs);
     return KVM_OK;
 }
 
@@ -830,7 +818,6 @@ case OP_FFICALL: {
         Value res;
         KvmStatus status = kvm_ffi_call(vm, sig->symbol_name, sig->sig_str, 1, &regs[b], &res);
         if (status != KVM_OK) {
-            free(regs);
             return status;
         }
         regs[a] = res;
@@ -854,8 +841,7 @@ do_OP_TRAP: {
 #else
 case OP_TRAP: {
 #endif
-    kvm_vm_set_error(vm, "Runtime trap at pc=%zu", pc);
-    free(regs);
+    kvm_vm_set_error(vm, KVM_ERR_VERIFIER_FAILURE, "Runtime trap at pc=%zu", pc);
     return KVM_ERR_VERIFIER_FAILURE;
 }
 
@@ -865,7 +851,6 @@ do_next:
     DISPATCH();
 
 do_end:
-    free(regs);
     return KVM_OK;
 #else
 default:
@@ -873,7 +858,6 @@ default:
     break;
 }
 }
-free(regs);
 return KVM_OK;
 #endif
 }
